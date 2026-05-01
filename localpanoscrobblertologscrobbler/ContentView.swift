@@ -7,6 +7,7 @@
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var selectedCSVURL: URL? = nil
@@ -65,7 +66,13 @@ struct ContentView: View {
 private extension ContentView {
     func selectCSV() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.commaSeparatedText]
+        if let csvType = UTType.commaSeparatedText as UTType? {
+            panel.allowedContentTypes = [csvType]
+        } else if let plain = UTType.plainText as UTType? {
+            panel.allowedContentTypes = [plain]
+        } else {
+            panel.allowedFileTypes = ["csv", "txt"]
+        }
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canCreateDirectories = false
@@ -85,91 +92,130 @@ private extension ContentView {
         }
 
         isConverting = true
-        defer { isConverting = false }
+        statusMessage = "Converting..."
 
-        do {
-            let inputString = try String(contentsOf: inputURL, encoding: .utf8)
-            let lines = inputString.split(whereSeparator: \n\r.contains(_:)).map(String.init)
-            guard !lines.isEmpty else {
-                statusMessage = "CSV is empty"
-                return
-            }
-
-            // Parse header to map columns by name (robust to column order)
-            let header = parseCSVRow(lines[0])
-            let headerIndex = indexMap(for: header)
-
-            // Required columns
-            guard headerIndex["artist"] != nil,
-                  headerIndex["track"] != nil,
-                  headerIndex["album"] != nil,
-                  headerIndex["albumArtist"] != nil,
-                  headerIndex["timeMs"] != nil,
-                  headerIndex["durationMs"] != nil,
-                  headerIndex["event"] != nil else {
-                statusMessage = "CSV header missing required columns"
-                return
-            }
-
-            var outputLines: [String] = ["#scrobbler-log-1.0"]
-            outputLines.reserveCapacity(lines.count)
-
-            for line in lines.dropFirst() {
-                if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-                let fields = parseCSVRow(line)
-
-                func value(_ key: String) -> String? {
-                    guard let idx = headerIndex[key], idx < fields.count else { return nil }
-                    let v = fields[idx]
-                    return v.isEmpty ? nil : v
+        Task.detached(priority: .userInitiated) {
+            do {
+                let inputString = try String(contentsOf: inputURL, encoding: .utf8)
+                let lines: [String] = inputString.components(separatedBy: CharacterSet.newlines)
+                guard !lines.isEmpty else {
+                    await MainActor.run {
+                        self.statusMessage = "CSV is empty"
+                        self.isConverting = false
+                    }
+                    return
                 }
 
-                guard (value("event") ?? "") == "scrobble" else { continue }
+                // Parse header
+                var firstLine = lines[0]
+                if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
+                let header = parseCSVRow(firstLine)
+                let headerIndex = indexMapNormalized(for: header)
 
-                let artist = value("artist") ?? ""
-                let title = value("track") ?? ""
-                let album = value("album") ?? ""
-                let albumArtist = value("albumArtist") ?? ""
+                // Required columns
+                guard headerIndex["artist"] != nil,
+                      headerIndex["track"] != nil,
+                      headerIndex["album"] != nil,
+                      headerIndex["albumartist"] != nil,
+                      headerIndex["timems"] != nil,
+                      headerIndex["durationms"] != nil,
+                      headerIndex["event"] != nil else {
+                    await MainActor.run {
+                        self.statusMessage = "CSV header missing required columns"
+                        self.isConverting = false
+                    }
+                    return
+                }
 
-                let timestampSec: Int = {
-                    if let msStr = value("timeMs"), let ms = Int64(msStr) { return Int(ms / 1000) }
-                    return 0
-                }()
+                var outputLines: [String] = ["#scrobbler-log-1.0"]
+                outputLines.reserveCapacity(lines.count)
 
-                let durationSec: Int = {
-                    if let msStr = value("durationMs"), let ms = Int64(msStr) { return Int(ms / 1000) }
-                    return 0
-                }()
+                let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
 
-                let trackNum = "" // leave empty
-                let rating = "L"
-                let musicBrainzID = "" // leave empty
+                var processed = 0
+                var skipped = 0
 
-                // TSV fields in order: Artist \t Album \t Title \t TrackNum \t Duration \t Rating \t Timestamp \t AlbumArtist \t MusicBrainzID
-                let tsv = [artist, album, title, trackNum, String(durationSec), rating, String(timestampSec), albumArtist, musicBrainzID]
-                    .map { escapeTSV($0) }
-                    .joined(separator: "\t")
+                for line in lines.dropFirst() {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { continue }
+                    let fields = parseCSVRow(line)
+                    if fields.count <= maxRequiredIndex { skipped += 1; continue }
 
-                outputLines.append(tsv)
+                    func value(_ key: String) -> String? {
+                        guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
+                        let v = fields[idx]
+                        return v.isEmpty ? nil : v
+                    }
+
+                    guard (value("event") ?? "") == "scrobble" else { continue }
+
+                    let artist = value("artist") ?? ""
+                    let title = value("track") ?? ""
+                    let album = value("album") ?? ""
+                    let albumArtist = value("albumartist") ?? ""
+
+                    let timestampSec: Int = {
+                        if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                        return 0
+                    }()
+
+                    let durationSec: Int = {
+                        if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                        return 0
+                    }()
+
+                    let trackNum = ""
+                    let rating = "L"
+                    let musicBrainzID = ""
+
+                    let tsv = [artist, album, title, trackNum, String(durationSec), rating, String(timestampSec), albumArtist, musicBrainzID]
+                        .map { escapeTSV($0) }
+                        .joined(separator: "\t")
+
+                    outputLines.append(tsv)
+                    processed += 1
+                }
+
+                let outputString = outputLines.joined(separator: "\n") + "\n"
+
+                await MainActor.run {
+                    self.isConverting = false
+                }
+
+                // Save panel must be shown on main thread
+                try await MainActor.run { [outputString] in
+                    let savePanel = NSSavePanel()
+                    if let logType = UTType.log as UTType? {
+                        savePanel.allowedContentTypes = [logType]
+                    } else if let plain = UTType.plainText as UTType? {
+                        savePanel.allowedContentTypes = [plain]
+                    } else {
+                        savePanel.allowedFileTypes = ["log", "txt"]
+                    }
+                    savePanel.nameFieldStringValue = "converted.scrobbler.log"
+                    savePanel.canCreateDirectories = true
+                    savePanel.title = ".scrobbler.log destination"
+                    savePanel.prompt = "Save"
+
+                    if savePanel.runModal() == .OK, let outURL = savePanel.url {
+                        do {
+                            try outputString.write(to: outURL, atomically: true, encoding: .utf8)
+                            self.statusMessage = "Saved: \(outURL.lastPathComponent) (\(processed) scrobbles, skipped: \(skipped))"
+                            // Auto-open the saved file
+                            NSWorkspace.shared.open(outURL)
+                        } catch {
+                            self.statusMessage = "Save failed: \(error.localizedDescription)"
+                        }
+                    } else {
+                        self.statusMessage = "Save cancelled"
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.statusMessage = "Error: \(error.localizedDescription)"
+                    self.isConverting = false
+                }
             }
-
-            let outputString = outputLines.joined(separator: "\n") + "\n"
-
-            let savePanel = NSSavePanel()
-            savePanel.allowedContentTypes = [.log]
-            savePanel.nameFieldStringValue = "converted.scrobbler.log"
-            savePanel.canCreateDirectories = true
-            savePanel.title = ".scrobbler.log destination"
-            savePanel.prompt = "Save"
-
-            if savePanel.runModal() == .OK, let outURL = savePanel.url {
-                try outputString.write(to: outURL, atomically: true, encoding: .utf8)
-                statusMessage = "Saved: \(outURL.lastPathComponent) (\(outputLines.count - 1) scrobbles)"
-            } else {
-                statusMessage = "Save cancelled"
-            }
-        } catch {
-            statusMessage = "Error: \(error.localizedDescription)"
         }
     }
 }
@@ -178,73 +224,62 @@ private extension ContentView {
 private extension ContentView {
     // Minimal CSV parser supporting commas, quoted fields, and escaped quotes ("")
     func parseCSVRow(_ line: String) -> [String] {
-        var result: [String] = []
-        var current = ""
+        var fields: [String] = []
+        var field = ""
         var inQuotes = false
-        var iterator = line.makeIterator()
+        var i = line.startIndex
 
-        while let ch = iterator.next() {
+        func appendField() {
+            fields.append(field)
+            field.removeAll(keepingCapacity: true)
+        }
+
+        while i < line.endIndex {
+            let ch = line[i]
             if inQuotes {
-                if ch == "\"" { // quote
-                    if let peek = iterator.next() {
-                        if peek == "\"" { // escaped quote
-                            current.append("\"")
-                        } else if peek == "," { // end quoted field
-                            result.append(current)
-                            current = ""
-                            inQuotes = false
-                            // consumed comma, continue
-                        } else {
-                            // end quote, then a non-comma char; treat as end quote and continue parsing that char
-                            inQuotes = false
-                            if peek == "\r" || peek == "\n" {
-                                // end of line
-                                break
-                            } else {
-                                // not a comma, treat as separator missing; append and continue
-                                if peek == "\t" { // unlikely in CSV, but handle gracefully
-                                    result.append(current)
-                                    current = ""
-                                } else if peek == "," {
-                                    result.append(current)
-                                    current = ""
-                                } else {
-                                    // unexpected char, append and continue
-                                    current.append(peek)
-                                }
-                            }
-                        }
+                if ch == "\"" {
+                    let nextIndex = line.index(after: i)
+                    if nextIndex < line.endIndex && line[nextIndex] == "\"" {
+                        // Escaped quote
+                        field.append("\"")
+                        i = nextIndex
                     } else {
-                        // closing quote at end of line
-                        result.append(current)
-                        current = ""
+                        // Closing quote
                         inQuotes = false
                     }
                 } else {
-                    current.append(ch)
+                    field.append(ch)
                 }
             } else {
                 if ch == "," {
-                    result.append(current)
-                    current = ""
+                    appendField()
                 } else if ch == "\"" {
                     inQuotes = true
                 } else if ch == "\r" || ch == "\n" {
                     break
                 } else {
-                    current.append(ch)
+                    field.append(ch)
                 }
             }
+            i = line.index(after: i)
         }
-        // append last field
-        result.append(current)
-        return result
+        appendField()
+        return fields
     }
 
     func indexMap(for headers: [String]) -> [String: Int] {
         var map: [String: Int] = [:]
         for (i, h) in headers.enumerated() {
             map[h.trimmingCharacters(in: .whitespacesAndNewlines)] = i
+        }
+        return map
+    }
+
+    func indexMapNormalized(for headers: [String]) -> [String: Int] {
+        var map: [String: Int] = [:]
+        for (i, h) in headers.enumerated() {
+            let key = h.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            map[key] = i
         }
         return map
     }
