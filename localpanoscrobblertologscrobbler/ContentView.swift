@@ -59,6 +59,9 @@ struct ContentView: View {
         }
         .padding(20)
         .frame(minWidth: 520, minHeight: 260)
+        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+            handleDrop(providers: providers)
+        }
     }
 }
 
@@ -217,6 +220,34 @@ private extension ContentView {
                 }
             }
         }
+    }
+
+    func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
+            statusMessage = "Drop: No file URL detected"
+            return false
+        }
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+            if let data = item as? Data,
+               let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?,
+               ["csv","txt"].contains(url.pathExtension.lowercased()) {
+                DispatchQueue.main.async {
+                    self.selectedCSVURL = url
+                    self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                }
+            } else if let url = item as? URL,
+                      ["csv","txt"].contains(url.pathExtension.lowercased()) {
+                DispatchQueue.main.async {
+                    self.selectedCSVURL = url
+                    self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Drop: Only .csv or .txt files are supported"
+                }
+            }
+        }
+        return true
     }
 }
 
