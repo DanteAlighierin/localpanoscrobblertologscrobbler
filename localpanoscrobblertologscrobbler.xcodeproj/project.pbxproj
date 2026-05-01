@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		FEBACE7D2FA4EE650023723C /* README.md in Sources */ = {isa = PBXBuildFile; fileRef = FEBACE7B2FA4EE550023723C /* README.md */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		FEACD6582FA4D790000D9379 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -27,6 +31,7 @@
 		FEACD6482FA4D78F000D9379 /* localpanoscrobblertologscrobbler.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = localpanoscrobblertologscrobbler.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEACD6572FA4D790000D9379 /* localpanoscrobblertologscrobblerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = localpanoscrobblertologscrobblerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEACD6612FA4D790000D9379 /* localpanoscrobblertologscrobblerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = localpanoscrobblertologscrobblerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FEBACE7B2FA4EE550023723C /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -43,6 +48,11 @@
 		FEACD6642FA4D790000D9379 /* localpanoscrobblertologscrobblerUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = localpanoscrobblertologscrobblerUITests;
+			sourceTree = "<group>";
+		};
+		FEBACE822FA4F0280023723C /* assets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = assets;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -79,6 +89,8 @@
 				FEACD65A2FA4D790000D9379 /* localpanoscrobblertologscrobblerTests */,
 				FEACD6642FA4D790000D9379 /* localpanoscrobblertologscrobblerUITests */,
 				FEACD6492FA4D78F000D9379 /* Products */,
+				FEBACE7B2FA4EE550023723C /* README.md */,
+				FEBACE822FA4F0280023723C /* assets */,
 			);
 			sourceTree = "<group>";
 		};
@@ -109,6 +121,7 @@
 			);
 			fileSystemSynchronizedGroups = (
 				FEACD64A2FA4D78F000D9379 /* localpanoscrobblertologscrobbler */,
+				FEBACE822FA4F0280023723C /* assets */,
 			);
 			name = localpanoscrobblertologscrobbler;
 			packageProductDependencies = (
@@ -238,6 +251,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FEBACE7D2FA4EE650023723C /* README.md in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
