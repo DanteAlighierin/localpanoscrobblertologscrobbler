@@ -9,6 +9,21 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+enum EncodingChoice: String, CaseIterable, Identifiable {
+    case utf8 = "UTF-8"
+    case utf16 = "UTF-16"
+    case win1251 = "Windows-1251"
+
+    var id: String { rawValue }
+    var encoding: String.Encoding {
+        switch self {
+        case .utf8: return .utf8
+        case .utf16: return .utf16
+        case .win1251: return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.windowsCyrillic.rawValue)))
+        }
+    }
+}
+
 struct TrackPreviewRow: Identifiable, Hashable {
     let id = UUID()
     let artist: String
@@ -37,6 +52,7 @@ struct ContentView: View {
     @State private var statusMessage: String = "No file selected"
     @State private var isConverting: Bool = false
     @State private var previewRows: [TrackPreviewRow] = []
+    @State private var selectedEncoding: EncodingChoice = .utf8
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -74,6 +90,22 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(8)
+            }
+            
+            HStack(spacing: 12) {
+                Text("Encoding:")
+                Picker("Encoding", selection: $selectedEncoding) {
+                    ForEach(EncodingChoice.allCases) { encoding in
+                        Text(encoding.rawValue).tag(encoding)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 300)
+            }
+            .padding(.top, 4)
+            .onChange(of: selectedEncoding) { newValue in
+                if let url = selectedCSVURL { loadPreviewRows(from: url) }
             }
 
             if !previewRows.isEmpty {
@@ -127,6 +159,7 @@ private extension ContentView {
         if panel.runModal() == .OK, let url = panel.url {
             selectedCSVURL = url
             statusMessage = "Selected CSV: \(url.lastPathComponent)"
+            self.selectedEncoding = self.detectEncoding(for: url)
             loadPreviewRows(from: url)
         }
     }
@@ -142,7 +175,7 @@ private extension ContentView {
 
         Task.detached(priority: .userInitiated) {
             do {
-                let inputString = try String(contentsOf: inputURL, encoding: .utf8)
+                let inputString = try String(contentsOf: inputURL, encoding: selectedEncoding.encoding)
                 let lines: [String] = inputString.components(separatedBy: CharacterSet.newlines)
                 guard !lines.isEmpty else {
                     await MainActor.run {
@@ -277,6 +310,7 @@ private extension ContentView {
                 DispatchQueue.main.async {
                     self.selectedCSVURL = url
                     self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                    self.selectedEncoding = self.detectEncoding(for: url)
                     self.loadPreviewRows(from: url)
                 }
             } else if let url = item as? URL,
@@ -284,6 +318,7 @@ private extension ContentView {
                 DispatchQueue.main.async {
                     self.selectedCSVURL = url
                     self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                    self.selectedEncoding = self.detectEncoding(for: url)
                     self.loadPreviewRows(from: url)
                 }
             } else {
@@ -298,7 +333,7 @@ private extension ContentView {
     func loadPreviewRows(from url: URL) {
         previewRows = []
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let inputString = try? String(contentsOf: url, encoding: .utf8) else {
+            guard let inputString = try? String(contentsOf: url, encoding: selectedEncoding.encoding) else {
                 DispatchQueue.main.async {
                     self.statusMessage = "Preview: Can't read file"
                     self.previewRows = []
@@ -416,6 +451,21 @@ private extension ContentView {
         value.replacingOccurrences(of: "\t", with: " ")
              .replacingOccurrences(of: "\n", with: " ")
              .replacingOccurrences(of: "\r", with: " ")
+    }
+
+    func detectEncoding(for url: URL) -> EncodingChoice {
+        if let s = try? String(contentsOf: url, encoding: .utf8), s.contains("artist") && s.contains("track") && !s.contains("\u{FFFD}") {
+            return .utf8
+        }
+        if let s = try? String(contentsOf: url, encoding: .utf16), s.contains("artist") && s.contains("track") && !s.contains("\u{FFFD}") {
+            return .utf16
+        }
+        // Windows-1251:
+        let win1251 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.windowsCyrillic.rawValue)))
+        if let s = try? String(contentsOf: url, encoding: win1251), s.contains("artist") && s.contains("track") && !s.contains("\u{FFFD}") {
+            return .win1251
+        }
+        return .utf8
     }
 }
 
