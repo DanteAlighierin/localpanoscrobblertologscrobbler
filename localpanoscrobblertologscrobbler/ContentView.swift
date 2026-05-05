@@ -17,6 +17,19 @@ struct TrackPreviewRow: Identifiable, Hashable {
     let albumArtist: String
     let timestamp: Int
     let duration: Int
+
+    var durationString: String {
+        let m = duration / 60
+        let s = duration % 60
+        return String(format: "%d:%02d", m, s)
+    }
+    var timestampString: String {
+        guard timestamp > 0 else { return "" }
+        let date = Date(timeIntervalSince1970: TimeInterval(timestamp))
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
 }
 
 struct ContentView: View {
@@ -72,10 +85,10 @@ struct ContentView: View {
                     TableColumn("Album", value: \.album)
                     TableColumn("Album Artist", value: \.albumArtist)
                     TableColumn("Timestamp") { row in
-                        Text("\(row.timestamp)")
+                        Text(row.timestampString)
                     }
                     TableColumn("Duration") { row in
-                        Text("\(row.duration)")
+                        Text(row.durationString)
                     }
                 }
                 .frame(maxHeight: 220)
