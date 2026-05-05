@@ -48,7 +48,7 @@ struct TrackPreviewRow: Identifiable, Hashable {
 }
 
 struct ContentView: View {
-    @State private var selectedCSVURL: URL? = nil
+    @State private var selectedCSVURLs: [URL] = []
     @State private var statusMessage: String = "No file selected"
     @State private var isConverting: Bool = false
     @State private var previewRows: [TrackPreviewRow] = []
@@ -66,15 +66,21 @@ struct ContentView: View {
 
                 Button("Convert and Save", action: convertAndSave)
                     .keyboardShortcut("s", modifiers: [.command])
-                    .disabled(selectedCSVURL == nil || isConverting)
+                    .disabled(selectedCSVURLs.isEmpty || isConverting)
             }
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 8) {
-                    if let url = selectedCSVURL {
-                        Text("Selected: \(url.path)")
-                            .font(.callout)
-                            .textSelection(.enabled)
+                    if !selectedCSVURLs.isEmpty {
+                        if selectedCSVURLs.count == 1 {
+                            Text("Selected: \(selectedCSVURLs[0].lastPathComponent)")
+                                .font(.callout)
+                                .textSelection(.enabled)
+                        } else {
+                            Text("Selected files: \(selectedCSVURLs.count)")
+                                .font(.callout)
+                                .textSelection(.enabled)
+                        }
                     } else {
                         Text("Selected: —")
                             .font(.callout)
@@ -105,7 +111,7 @@ struct ContentView: View {
             }
             .padding(.top, 4)
             .onChange(of: selectedEncoding) { newValue in
-                if let url = selectedCSVURL { loadPreviewRows(from: url) }
+                if !selectedCSVURLs.isEmpty { loadPreviewRows(from: selectedCSVURLs) }
             }
 
             if !previewRows.isEmpty {
@@ -150,23 +156,28 @@ private extension ContentView {
         } else {
             panel.allowedFileTypes = ["csv", "txt"]
         }
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canCreateDirectories = false
         panel.title = "Select Panoscrobbler CSV"
         panel.prompt = "Choose"
 
-        if panel.runModal() == .OK, let url = panel.url {
-            selectedCSVURL = url
-            statusMessage = "Selected CSV: \(url.lastPathComponent)"
-            self.selectedEncoding = self.detectEncoding(for: url)
-            loadPreviewRows(from: url)
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            selectedCSVURLs = panel.urls
+            if selectedCSVURLs.count == 1 {
+                statusMessage = "Selected CSV: \(selectedCSVURLs[0].lastPathComponent)"
+                self.selectedEncoding = self.detectEncoding(for: selectedCSVURLs[0])
+            } else {
+                statusMessage = "Selected files: \(selectedCSVURLs.count)"
+                self.selectedEncoding = self.detectEncoding(for: selectedCSVURLs[0])
+            }
+            loadPreviewRows(from: selectedCSVURLs)
         }
     }
 
     func convertAndSave() {
-        guard let inputURL = selectedCSVURL else {
-            statusMessage = "Please select an input CSV first"
+        guard !selectedCSVURLs.isEmpty else {
+            statusMessage = "Please select at least one input CSV first"
             return
         }
 
@@ -175,84 +186,79 @@ private extension ContentView {
 
         Task.detached(priority: .userInitiated) {
             do {
-                let inputString = try String(contentsOf: inputURL, encoding: selectedEncoding.encoding)
-                let lines: [String] = inputString.components(separatedBy: CharacterSet.newlines)
-                guard !lines.isEmpty else {
-                    await MainActor.run {
-                        self.statusMessage = "CSV is empty"
-                        self.isConverting = false
-                    }
-                    return
-                }
-
-                // Parse header
-                var firstLine = lines[0]
-                if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
-                let header = parseCSVRow(firstLine)
-                let headerIndex = indexMapNormalized(for: header)
-
-                // Required columns
-                guard headerIndex["artist"] != nil,
-                      headerIndex["track"] != nil,
-                      headerIndex["album"] != nil,
-                      headerIndex["albumartist"] != nil,
-                      headerIndex["timems"] != nil,
-                      headerIndex["durationms"] != nil,
-                      headerIndex["event"] != nil else {
-                    await MainActor.run {
-                        self.statusMessage = "CSV header missing required columns"
-                        self.isConverting = false
-                    }
-                    return
-                }
-
                 var outputLines: [String] = ["#scrobbler-log-1.0"]
-                outputLines.reserveCapacity(lines.count)
-
-                let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
+                outputLines.reserveCapacity(1000) // arbitrary large capacity
 
                 var processed = 0
                 var skipped = 0
 
-                for line in lines.dropFirst() {
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmed.isEmpty { continue }
-                    let fields = parseCSVRow(line)
-                    if fields.count <= maxRequiredIndex { skipped += 1; continue }
+                for inputURL in selectedCSVURLs {
+                    let inputString = try String(contentsOf: inputURL, encoding: selectedEncoding.encoding)
+                    let lines: [String] = inputString.components(separatedBy: CharacterSet.newlines)
+                    guard !lines.isEmpty else { continue }
 
-                    func value(_ key: String) -> String? {
-                        guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
-                        let v = fields[idx]
-                        return v.isEmpty ? nil : v
+                    // Parse header
+                    var firstLine = lines[0]
+                    if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
+                    let header = parseCSVRow(firstLine)
+                    let headerIndex = indexMapNormalized(for: header)
+
+                    // Required columns
+                    guard headerIndex["artist"] != nil,
+                          headerIndex["track"] != nil,
+                          headerIndex["album"] != nil,
+                          headerIndex["albumartist"] != nil,
+                          headerIndex["timems"] != nil,
+                          headerIndex["durationms"] != nil,
+                          headerIndex["event"] != nil else {
+                        await MainActor.run {
+                            self.statusMessage = "CSV header missing required columns in file \(inputURL.lastPathComponent)"
+                        }
+                        continue
                     }
 
-                    guard (value("event") ?? "") == "scrobble" else { continue }
+                    let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
 
-                    let artist = value("artist") ?? ""
-                    let title = value("track") ?? ""
-                    let album = value("album") ?? ""
-                    let albumArtist = value("albumartist") ?? ""
+                    for line in lines.dropFirst() {
+                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if trimmed.isEmpty { continue }
+                        let fields = parseCSVRow(line)
+                        if fields.count <= maxRequiredIndex { skipped += 1; continue }
 
-                    let timestampSec: Int = {
-                        if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
-                        return 0
-                    }()
+                        func value(_ key: String) -> String? {
+                            guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
+                            let v = fields[idx]
+                            return v.isEmpty ? nil : v
+                        }
 
-                    let durationSec: Int = {
-                        if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
-                        return 0
-                    }()
+                        guard (value("event") ?? "") == "scrobble" else { continue }
 
-                    let trackNum = ""
-                    let rating = "L"
-                    let musicBrainzID = ""
+                        let artist = value("artist") ?? ""
+                        let title = value("track") ?? ""
+                        let album = value("album") ?? ""
+                        let albumArtist = value("albumartist") ?? ""
 
-                    let tsv = [artist, album, title, trackNum, String(durationSec), rating, String(timestampSec), albumArtist, musicBrainzID]
-                        .map { escapeTSV($0) }
-                        .joined(separator: "\t")
+                        let timestampSec: Int = {
+                            if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                            return 0
+                        }()
 
-                    outputLines.append(tsv)
-                    processed += 1
+                        let durationSec: Int = {
+                            if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                            return 0
+                        }()
+
+                        let trackNum = ""
+                        let rating = "L"
+                        let musicBrainzID = ""
+
+                        let tsv = [artist, album, title, trackNum, String(durationSec), rating, String(timestampSec), albumArtist, musicBrainzID]
+                            .map { escapeTSV($0) }
+                            .joined(separator: "\t")
+
+                        outputLines.append(tsv)
+                        processed += 1
+                    }
                 }
 
                 let outputString = outputLines.joined(separator: "\n") + "\n"
@@ -262,7 +268,7 @@ private extension ContentView {
                 }
 
                 // Save panel must be shown on main thread
-                try await MainActor.run { [outputString] in
+                try await MainActor.run { [outputString, processed, skipped] in
                     let savePanel = NSSavePanel()
                     if let logType = UTType.log as UTType? {
                         savePanel.allowedContentTypes = [logType]
@@ -299,81 +305,94 @@ private extension ContentView {
     }
 
     func handleDrop(providers: [NSItemProvider]) -> Bool {
-        guard let provider = providers.first(where: { $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) }) else {
-            statusMessage = "Drop: No file URL detected"
-            return false
+        let supportedExtensions = ["csv", "txt"]
+        var urls: [URL] = []
+        let group = DispatchGroup()
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
+                defer { group.leave() }
+                var url: URL? = nil
+                if let data = item as? Data,
+                   let u = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL? {
+                    url = u
+                } else if let u = item as? URL {
+                    url = u
+                }
+                if let u = url, supportedExtensions.contains(u.pathExtension.lowercased()) {
+                    DispatchQueue.main.async {
+                        urls.append(u)
+                    }
+                }
+            }
         }
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
-            if let data = item as? Data,
-               let url = NSURL(absoluteURLWithDataRepresentation: data, relativeTo: nil) as URL?,
-               ["csv","txt"].contains(url.pathExtension.lowercased()) {
-                DispatchQueue.main.async {
-                    self.selectedCSVURL = url
-                    self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
-                    self.selectedEncoding = self.detectEncoding(for: url)
-                    self.loadPreviewRows(from: url)
+        group.notify(queue: .main) {
+            if !urls.isEmpty {
+                self.selectedCSVURLs = urls
+                if urls.count == 1 {
+                    self.statusMessage = "Selected CSV: \(urls[0].lastPathComponent) (dropped)"
+                } else {
+                    self.statusMessage = "Selected files: \(urls.count) (dropped)"
                 }
-            } else if let url = item as? URL,
-                      ["csv","txt"].contains(url.pathExtension.lowercased()) {
-                DispatchQueue.main.async {
-                    self.selectedCSVURL = url
-                    self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
-                    self.selectedEncoding = self.detectEncoding(for: url)
-                    self.loadPreviewRows(from: url)
-                }
+                self.selectedEncoding = self.detectEncoding(for: urls[0])
+                self.loadPreviewRows(from: urls)
             } else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Drop: Only .csv or .txt files are supported"
-                }
+                self.statusMessage = "Drop: Only .csv or .txt files are supported"
             }
         }
         return true
     }
 
-    func loadPreviewRows(from url: URL) {
+    func loadPreviewRows(from urls: [URL]) {
         previewRows = []
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let inputString = try? String(contentsOf: url, encoding: selectedEncoding.encoding) else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Preview: Can't read file"
-                    self.previewRows = []
-                }
-                return
-            }
-            let lines = inputString.components(separatedBy: CharacterSet.newlines)
-            guard !lines.isEmpty else { return }
-            var firstLine = lines[0]
-            if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
-            let header = parseCSVRow(firstLine)
-            let headerIndex = indexMapNormalized(for: header)
-            let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
             var previews: [TrackPreviewRow] = []
-            for line in lines.dropFirst() {
-                if previews.count >= 10 { break }
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { continue }
-                let fields = parseCSVRow(line)
-                if fields.count <= maxRequiredIndex { continue }
-                func value(_ key: String) -> String? {
-                    guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
-                    let v = fields[idx]
-                    return v.isEmpty ? nil : v
+            var totalCount = 0
+            for url in urls {
+                guard let inputString = try? String(contentsOf: url, encoding: selectedEncoding.encoding) else {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Preview: Can't read file \(url.lastPathComponent)"
+                    }
+                    continue
                 }
-                guard (value("event") ?? "") == "scrobble" else { continue }
-                let artist = value("artist") ?? ""
-                let title = value("track") ?? ""
-                let album = value("album") ?? ""
-                let albumArtist = value("albumartist") ?? ""
-                let timestampSec: Int = {
-                    if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
-                    return 0
-                }()
-                let durationSec: Int = {
-                    if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
-                    return 0
-                }()
-                let row = TrackPreviewRow(artist: artist, title: title, album: album, albumArtist: albumArtist, timestamp: timestampSec, duration: durationSec)
-                previews.append(row)
+                let lines = inputString.components(separatedBy: CharacterSet.newlines)
+                guard !lines.isEmpty else { continue }
+                var firstLine = lines[0]
+                if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
+                let header = parseCSVRow(firstLine)
+                let headerIndex = indexMapNormalized(for: header)
+                let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
+
+                for line in lines.dropFirst() {
+                    if totalCount >= 10 { break }
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.isEmpty { continue }
+                    let fields = parseCSVRow(line)
+                    if fields.count <= maxRequiredIndex { continue }
+                    func value(_ key: String) -> String? {
+                        guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
+                        let v = fields[idx]
+                        return v.isEmpty ? nil : v
+                    }
+                    guard (value("event") ?? "") == "scrobble" else { continue }
+                    let artist = value("artist") ?? ""
+                    let title = value("track") ?? ""
+                    let album = value("album") ?? ""
+                    let albumArtist = value("albumartist") ?? ""
+                    let timestampSec: Int = {
+                        if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                        return 0
+                    }()
+                    let durationSec: Int = {
+                        if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                        return 0
+                    }()
+                    let row = TrackPreviewRow(artist: artist, title: title, album: album, albumArtist: albumArtist, timestamp: timestampSec, duration: durationSec)
+                    previews.append(row)
+                    totalCount += 1
+                    if totalCount >= 10 { break }
+                }
+                if totalCount >= 10 { break }
             }
             DispatchQueue.main.async {
                 self.previewRows = previews
