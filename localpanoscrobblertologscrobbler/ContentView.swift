@@ -9,10 +9,21 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 
+struct TrackPreviewRow: Identifiable, Hashable {
+    let id = UUID()
+    let artist: String
+    let title: String
+    let album: String
+    let albumArtist: String
+    let timestamp: Int
+    let duration: Int
+}
+
 struct ContentView: View {
     @State private var selectedCSVURL: URL? = nil
     @State private var statusMessage: String = "No file selected"
     @State private var isConverting: Bool = false
+    @State private var previewRows: [TrackPreviewRow] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -52,6 +63,24 @@ struct ContentView: View {
                 .padding(8)
             }
 
+            if !previewRows.isEmpty {
+                Text("Preview (first \(previewRows.count) tracks):")
+                    .font(.subheadline).bold()
+                Table(previewRows) {
+                    TableColumn("Artist", value: \.artist)
+                    TableColumn("Title", value: \.title)
+                    TableColumn("Album", value: \.album)
+                    TableColumn("Album Artist", value: \.albumArtist)
+                    TableColumn("Timestamp") { row in
+                        Text("\(row.timestamp)")
+                    }
+                    TableColumn("Duration") { row in
+                        Text("\(row.duration)")
+                    }
+                }
+                .frame(maxHeight: 220)
+            }
+
             Spacer()
             Text("CSV columns: artist, track, album, albumArtist, timeMs, durationMs, event")
                 .font(.footnote)
@@ -85,6 +114,7 @@ private extension ContentView {
         if panel.runModal() == .OK, let url = panel.url {
             selectedCSVURL = url
             statusMessage = "Selected CSV: \(url.lastPathComponent)"
+            loadPreviewRows(from: url)
         }
     }
 
@@ -234,12 +264,14 @@ private extension ContentView {
                 DispatchQueue.main.async {
                     self.selectedCSVURL = url
                     self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                    self.loadPreviewRows(from: url)
                 }
             } else if let url = item as? URL,
                       ["csv","txt"].contains(url.pathExtension.lowercased()) {
                 DispatchQueue.main.async {
                     self.selectedCSVURL = url
                     self.statusMessage = "Selected CSV: \(url.lastPathComponent) (dropped)"
+                    self.loadPreviewRows(from: url)
                 }
             } else {
                 DispatchQueue.main.async {
@@ -248,6 +280,57 @@ private extension ContentView {
             }
         }
         return true
+    }
+
+    func loadPreviewRows(from url: URL) {
+        previewRows = []
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let inputString = try? String(contentsOf: url, encoding: .utf8) else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Preview: Can't read file"
+                    self.previewRows = []
+                }
+                return
+            }
+            let lines = inputString.components(separatedBy: CharacterSet.newlines)
+            guard !lines.isEmpty else { return }
+            var firstLine = lines[0]
+            if firstLine.hasPrefix("\u{FEFF}") { firstLine.removeFirst() }
+            let header = parseCSVRow(firstLine)
+            let headerIndex = indexMapNormalized(for: header)
+            let maxRequiredIndex = ["artist","track","album","albumartist","timems","durationms","event"].compactMap { headerIndex[$0] }.max() ?? 0
+            var previews: [TrackPreviewRow] = []
+            for line in lines.dropFirst() {
+                if previews.count >= 10 { break }
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty { continue }
+                let fields = parseCSVRow(line)
+                if fields.count <= maxRequiredIndex { continue }
+                func value(_ key: String) -> String? {
+                    guard let idx = headerIndex[key.lowercased()], idx < fields.count else { return nil }
+                    let v = fields[idx]
+                    return v.isEmpty ? nil : v
+                }
+                guard (value("event") ?? "") == "scrobble" else { continue }
+                let artist = value("artist") ?? ""
+                let title = value("track") ?? ""
+                let album = value("album") ?? ""
+                let albumArtist = value("albumartist") ?? ""
+                let timestampSec: Int = {
+                    if let msStr = value("timems"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                    return 0
+                }()
+                let durationSec: Int = {
+                    if let msStr = value("durationms"), let ms = Int64(msStr.filter({ $0.isNumber })) { return Int(ms / 1000) }
+                    return 0
+                }()
+                let row = TrackPreviewRow(artist: artist, title: title, album: album, albumArtist: albumArtist, timestamp: timestampSec, duration: durationSec)
+                previews.append(row)
+            }
+            DispatchQueue.main.async {
+                self.previewRows = previews
+            }
+        }
     }
 }
 
